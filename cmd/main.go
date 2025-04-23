@@ -2,38 +2,60 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
+	"service/internal/book"
+	"service/pkg"
 	customServer "service/server"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 )
+
+type Env struct {
+	book *book.BookModel
+}
 
 func Start(sigs chan os.Signal) {
 	<-sigs
 }
 
 func main() {
+	godotenv.Load()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// logger
+	logger := pkg.GetLogger()
+
 	// db connection
 	dbPool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
-		fmt.Printf("Unable to create connection pool: %v\n", err)
+		logger.Errorf("Unable to create connection pool: %v\n", err)
 		os.Exit(1)
 	}
 	defer dbPool.Close()
 
+	pool, err := dbPool.Acquire(ctx)
+	if err != nil {
+		logger.Errorf("Error while acquiring connection from the database pool: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Release()
+
 	// server
 	server := customServer.CreateNewServer("localhost", "8080")
 
-	apiRouter := server.Router.PathPrefix("/api").Subrouter()
-	apiRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-	})
+	handlers := Env{
+		book: book.GetBookModel(pool, logger),
+	}
 
+	apiRouter := server.Router.PathPrefix("/api").Subrouter()
+	apiRouter.HandleFunc("/book/add", book.AddBookHandler(handlers.book)).Methods("POST")
+	apiRouter.HandleFunc("/book/update", book.UpdateBookHandler(handlers.book)).Methods("POST")
+	apiRouter.HandleFunc("/book/get/{name}", book.GetBookHandler(handlers.book)).Methods("GET")
 	server.Run()
 
 	// starting
